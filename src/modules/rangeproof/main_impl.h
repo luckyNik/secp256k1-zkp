@@ -88,6 +88,31 @@ int secp256k1_rangeproof_sign(const secp256k1_context* ctx, unsigned char *proof
      proof, plen, min_value, &commitp, blind, nonce, exp, min_bits, value, message, msg_len, extra_commit, extra_commit_len, &genp);
 }
 
+int secp256k1_rangeproof_extract(const secp256k1_context* ctx,
+ unsigned char *blind_out, uint64_t *value_out,
+ uint64_t *min_value, uint64_t *max_value,
+ const secp256k1_pedersen_commitment *commit, const unsigned char *proof, size_t plen,
+ const unsigned char *nonce, const unsigned char *extra_commit, size_t extra_commit_len,
+ const secp256k1_generator* gen) {
+    secp256k1_ge commitp;
+    secp256k1_ge genp;
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(blind_out != NULL);
+    ARG_CHECK(value_out != NULL);
+    ARG_CHECK(min_value != NULL);
+    ARG_CHECK(max_value != NULL);
+    ARG_CHECK(commit != NULL);
+    ARG_CHECK(proof != NULL);
+    ARG_CHECK(nonce != NULL);
+    ARG_CHECK(extra_commit != NULL || extra_commit_len == 0);
+    ARG_CHECK(gen != NULL);
+    ARG_CHECK(secp256k1_ecmult_gen_context_is_built(&ctx->ecmult_gen_ctx));
+    secp256k1_pedersen_commitment_load(&commitp, commit);
+    secp256k1_generator_load(&genp, gen);
+    return secp256k1_rangeproof_extract_impl(&ctx->ecmult_gen_ctx,
+     blind_out, value_out, min_value, max_value, &commitp, proof, plen, nonce, extra_commit, extra_commit_len, &genp);
+}
+
 size_t secp256k1_rangeproof_max_size(const secp256k1_context* ctx, uint64_t max_value, int min_bits) {
     const int val_mantissa = max_value > 0 ? 64 - secp256k1_clz64_var(max_value) : 1;
     const int mantissa = min_bits > val_mantissa ? min_bits : val_mantissa;

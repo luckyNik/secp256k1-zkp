@@ -1346,6 +1346,144 @@ static void test_rangeproof_fixed_vectors_reproducible(void) {
     }
 }
 
+static void test_rangeproof_extract(void) {
+    unsigned char proof[5134];
+    unsigned char blind[32];
+    unsigned char blind_out[32];
+    unsigned char nonce[32];
+    secp256k1_pedersen_commitment commit;
+    uint64_t value_out;
+    uint64_t vmin;
+    uint64_t val;
+    uint64_t minv;
+    uint64_t maxv;
+    size_t len;
+    size_t i;
+    int j;
+
+    /* Test extract with randomised values */
+    for (i = 0; i < (size_t)COUNT; i++) {
+        testrand256(blind);
+        testrand256(nonce);
+        vmin = testrand32() % 1000;
+        val = vmin + (testrand32() % 10000);
+
+        CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, 0, 0, val, NULL, 0, NULL, 0, secp256k1_generator_h) == 1);
+
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(value_out == val);
+        CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+        CHECK(minv <= val);
+        CHECK(maxv >= val);
+    }
+
+    /* Test extract with single-value proof */
+    testrand256(blind);
+    testrand256(nonce);
+    val = 42;
+    CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+    len = sizeof(proof);
+    CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, val, &commit, blind, nonce, -1, 64, val, NULL, 0, NULL, 0, secp256k1_generator_h) == 1);
+    CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, NULL, 0, secp256k1_generator_h) == 1);
+    CHECK(value_out == val);
+    CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+
+    /* Test extract with different exponents */
+    testrand256(blind);
+    testrand256(nonce);
+    val = 1234567890;
+    vmin = 0;
+    CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+    for (j = 0; j < 5; j++) {
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, j, 0, val, NULL, 0, NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(value_out == val);
+        CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+    }
+
+    /* Test extract with extra_commit */
+    {
+        unsigned char extra[32];
+        testrand256(blind);
+        testrand256(nonce);
+        testrand256(extra);
+        val = 5000;
+        vmin = 0;
+        CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, 0, 0, val, NULL, 0, extra, sizeof(extra), secp256k1_generator_h) == 1);
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, extra, sizeof(extra), secp256k1_generator_h) == 1);
+        CHECK(value_out == val);
+        CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+    }
+
+    /* Test extract with embedded message (extract won't recover the message
+     * but should still correctly extract value and blinding factor). */
+    {
+        const unsigned char message[68] = "Some test message data for the rangeproof extract functionality!!";
+        testrand256(blind);
+        testrand256(nonce);
+        val = 100000;
+        vmin = 0;
+        CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, 0, 0, val, message, sizeof(message), NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(value_out == val);
+        CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+    }
+
+    /* Test that extract with wrong nonce fails */
+    {
+        unsigned char wrong_nonce[32];
+        testrand256(blind);
+        testrand256(nonce);
+        testrand256(wrong_nonce);
+        val = 500;
+        vmin = 0;
+        CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, 0, 0, val, NULL, 0, NULL, 0, secp256k1_generator_h) == 1);
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, wrong_nonce, NULL, 0, secp256k1_generator_h) == 0);
+    }
+
+    /* Cross-check extract against rewind for various random proofs */
+    for (i = 0; i < (size_t)COUNT; i++) {
+        unsigned char blind_rewind[32];
+        uint64_t value_rewind;
+        uint64_t minv_r;
+        uint64_t maxv_r;
+
+        testrand256(blind);
+        testrand256(nonce);
+        val = testrandi64(0, UINT64_MAX >> (testrand32() & 63));
+        vmin = 0;
+        if ((val < INT64_MAX) && (testrand32() & 1)) {
+            vmin = testrandi64(0, val);
+        }
+
+        CHECK(secp256k1_pedersen_commit(CTX, &commit, blind, val, secp256k1_generator_h));
+        len = sizeof(proof);
+        CHECK(secp256k1_rangeproof_sign(CTX, proof, &len, vmin, &commit, blind, nonce, 0, 0, val, NULL, 0, NULL, 0, secp256k1_generator_h) == 1);
+
+        /* Extract */
+        CHECK(secp256k1_rangeproof_extract(CTX, blind_out, &value_out, &minv, &maxv, &commit, proof, len, nonce, NULL, 0, secp256k1_generator_h) == 1);
+        /* Rewind */
+        CHECK(secp256k1_rangeproof_rewind(CTX, blind_rewind, &value_rewind, NULL, NULL, nonce, &minv_r, &maxv_r, &commit, proof, len, NULL, 0, secp256k1_generator_h) == 1);
+
+        /* Both should agree on value and blinding factor */
+        CHECK(value_out == value_rewind);
+        CHECK(secp256k1_memcmp_var(blind_out, blind_rewind, 32) == 0);
+        CHECK(value_out == val);
+        CHECK(secp256k1_memcmp_var(blind_out, blind, 32) == 0);
+    }
+}
+
+
 static void run_rangeproof_tests(void) {
     int i;
     for (i = 0; i < COUNT; i++) {
@@ -1364,6 +1502,7 @@ static void run_rangeproof_tests(void) {
     test_rangeproof();
     test_rangeproof_null_blinder();
     test_multiple_generators();
+    test_rangeproof_extract();
 }
 
 #endif

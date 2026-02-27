@@ -70,6 +70,26 @@ contrib/gh-pr-create.sh
 /CMakeUserPresets.json
 # Default CMake build directory.
 /build
+# In-tree CMake build artifacts
+/out/
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Makefile
+/bin/
+/lib/
+/src/CMakeFiles/
+/src/cmake_install.cmake
+/src/CTestTestfile.cmake
+/src/libsecp256k1-config.cmake
+/src/libsecp256k1-config-version.cmake
+/src/libsecp256k1.pc
+/src/Makefile
+/examples/CMakeFiles/
+/examples/cmake_install.cmake
+/examples/CTestTestfile.cmake
+/examples/Makefile
 
 ### Python
 __pycache__/

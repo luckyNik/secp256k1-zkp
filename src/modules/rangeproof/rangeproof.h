@@ -17,4 +17,10 @@ static int secp256k1_rangeproof_verify_impl(const secp256k1_ecmult_gen_context* 
  uint64_t *min_value, uint64_t *max_value, const secp256k1_ge *commit, const unsigned char *proof, size_t plen,
  const unsigned char *extra_commit, size_t extra_commit_len, const secp256k1_ge* genp);
 
+static int secp256k1_rangeproof_extract_impl(const secp256k1_ecmult_gen_context* ecmult_gen_ctx,
+ unsigned char *blindout, uint64_t *value_out,
+ uint64_t *min_value, uint64_t *max_value, const secp256k1_ge *commit,
+ const unsigned char *proof, size_t plen, const unsigned char *nonce,
+ const unsigned char *extra_commit, size_t extra_commit_len, const secp256k1_ge* genp);
+
 #endif

@@ -154,6 +154,46 @@ SECP256K1_API SECP256K1_WARN_UNUSED_RESULT int secp256k1_rangeproof_sign(
   const secp256k1_generator *gen
 ) SECP256K1_ARG_NONNULL(1) SECP256K1_ARG_NONNULL(2) SECP256K1_ARG_NONNULL(3) SECP256K1_ARG_NONNULL(5) SECP256K1_ARG_NONNULL(6) SECP256K1_ARG_NONNULL(7) SECP256K1_ARG_NONNULL(15);
 
+/** Verify a range proof and extract the committed value and blinding factor
+ *  by brute-forcing the digit decomposition using the proof nonce.
+ *
+ *  Unlike secp256k1_rangeproof_rewind, which relies on a sidechannel encoding
+ *  of the value within the proof, this function determines each radix-4 digit
+ *  by testing which ring public key matches the DRBG-derived blinding factor,
+ *  and recovers the last ring's opening via the borromean signature.
+ *
+ *  This function does NOT recover embedded messages.
+ *
+ *  Returns 1: Value and blinding factor successfully extracted and verified.
+ *          0: Proof verification failed, extraction failed, or other error.
+ *  In:   ctx: pointer to a context object (not secp256k1_context_static)
+ *        commit: the commitment being proved. (cannot be NULL)
+ *        proof: pointer to character array with the proof. (cannot be NULL)
+ *        plen: length of proof in bytes.
+ *        nonce: 32-byte secret nonce used by the prover (cannot be NULL)
+ *        extra_commit: additional data covered in rangeproof signature
+ *        extra_commit_len: length of extra_commit byte array (0 if NULL)
+ *        gen: additional generator 'h'
+ *  Out:  blind_out: storage for the 32-byte blinding factor used for the commitment (cannot be NULL)
+ *        value_out: pointer to an unsigned int64 which will receive the exact value of the commitment. (cannot be NULL)
+ *        min_value: pointer to an unsigned int64 which will be updated with the minimum value that commit could have. (cannot be NULL)
+ *        max_value: pointer to an unsigned int64 which will be updated with the maximum value that commit could have. (cannot be NULL)
+ */
+SECP256K1_API SECP256K1_WARN_UNUSED_RESULT int secp256k1_rangeproof_extract(
+  const secp256k1_context *ctx,
+  unsigned char *blind_out,
+  uint64_t *value_out,
+  uint64_t *min_value,
+  uint64_t *max_value,
+  const secp256k1_pedersen_commitment *commit,
+  const unsigned char *proof,
+  size_t plen,
+  const unsigned char *nonce,
+  const unsigned char *extra_commit,
+  size_t extra_commit_len,
+  const secp256k1_generator *gen
+) SECP256K1_ARG_NONNULL(1) SECP256K1_ARG_NONNULL(2) SECP256K1_ARG_NONNULL(3) SECP256K1_ARG_NONNULL(4) SECP256K1_ARG_NONNULL(5) SECP256K1_ARG_NONNULL(6) SECP256K1_ARG_NONNULL(7) SECP256K1_ARG_NONNULL(9) SECP256K1_ARG_NONNULL(12);
+
 /** Extract some basic information from a range-proof.
  *  Returns 1: Information successfully extracted.
  *          0: Decode failed.

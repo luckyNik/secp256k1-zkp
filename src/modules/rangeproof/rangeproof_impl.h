@@ -484,6 +484,157 @@ SECP256K1_INLINE static int secp256k1_rangeproof_rewind_inner(secp256k1_scalar *
     return 1;
 }
 
+/** Extract the committed value and blinding factor from a rangeproof by
+ *  brute-forcing the base-4 digit decomposition using DRBG-derived blinders.
+ *
+ *  Unlike rewind_inner which relies on a sidechannel encoding of the value
+ *  in the signature values, this function determines each digit by testing
+ *  which expanded public key matches sec[i]*G for the non-last rings, and
+ *  recovers the last ring's opening via the borromean signature.
+ *
+ *  Algorithm:
+ *  1. Reproduce DRBG blinders sec[i] and forged signatures s_orig[i].
+ *  2. For each ring i < rings-1: find digit j s.t. pubs[offset+j] == sec[i]*G.
+ *  3. For the last ring: recover candidate blinding factors x_j from the
+ *     borromean signature using recover_x, then brute-force (x_j, digit_k)
+ *     pairs (at most B^2 = 16 checks) to find which candidate_x*G matches
+ *     one of the expanded public keys.
+ *  4. Compute value = sum(digit[i] << (2*i)) and
+ *     blind = candidate_x - sec_drbg[rings-1].
+ */
+SECP256K1_INLINE static int secp256k1_rangeproof_extract_inner(
+ const secp256k1_ecmult_gen_context *ecmult_gen_ctx,
+ secp256k1_scalar *blind, uint64_t *v,
+ secp256k1_scalar *ev, secp256k1_scalar *s,
+ secp256k1_gej *pubs, size_t *rsizes, size_t rings,
+ const unsigned char *nonce, const secp256k1_ge *commit,
+ const unsigned char *proof, size_t len, const secp256k1_ge *genp) {
+    secp256k1_scalar s_orig[128];
+    secp256k1_scalar sec[32];
+    secp256k1_scalar candidate_x;
+    unsigned char prep[4096];
+    secp256k1_gej sec_g;
+    secp256k1_gej diff;
+    uint64_t value;
+    size_t npub;
+    size_t npub_offset;
+    size_t i;
+    size_t j;
+    size_t k;
+    int found;
+
+    npub = ((rings - 1) << 2) + rsizes[rings - 1];
+    VERIFY_CHECK(npub <= 128);
+    VERIFY_CHECK(npub >= 1);
+    (void)npub;
+
+    memset(prep, 0, 4096);
+    /* Reconstruct the prover's DRBG-derived random values. */
+    secp256k1_rangeproof_genrand(sec, s_orig, prep, rsizes, rings, nonce, commit, proof, len, genp);
+
+    *v = UINT64_MAX;
+    secp256k1_scalar_clear(blind);
+
+    if (rings == 1 && rsizes[0] == 1) {
+        /* Single-value proof: only one ring with one pubkey. The blinding
+         * factor is the discrete log of pubs[0], recoverable via the
+         * borromean signature. */
+        secp256k1_rangeproof_recover_x(blind, &s_orig[0], &ev[0], &s[0]);
+        *v = 0;
+        secp256k1_memclear(prep, 4096);
+        for (i = 0; i < 128; i++) {
+            secp256k1_scalar_clear(&s_orig[i]);
+        }
+        for (i = 0; i < 32; i++) {
+            secp256k1_scalar_clear(&sec[i]);
+        }
+        return 1;
+    }
+
+    value = 0;
+
+    /* Step 2: For each ring i < rings-1, determine the digit by brute force.
+     * After pub_expand, pubs[offset+j] = C_i + j * base_i where
+     * base_i = -scale * 4^i * H.  The signing key at the correct index
+     * secidx[i] satisfies pubs[offset+secidx[i]] = sec[i] * G.
+     * We know sec[i] from the DRBG, so compute sec[i]*G and find j. */
+    npub_offset = 0;
+    for (i = 0; i < rings - 1; i++) {
+        secp256k1_ecmult_gen(ecmult_gen_ctx, &sec_g, &sec[i]);
+        found = 0;
+        for (j = 0; j < rsizes[i]; j++) {
+            secp256k1_gej_neg(&diff, &sec_g);
+            secp256k1_gej_add_var(&diff, &diff, &pubs[npub_offset + j], NULL);
+            if (secp256k1_gej_is_infinity(&diff)) {
+                value |= ((uint64_t)j) << (i * 2);
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            secp256k1_memclear(prep, 4096);
+            return 0;
+        }
+        npub_offset += rsizes[i];
+    }
+
+    /* Steps 3+4: For the last ring, recover candidate blinding factors from
+     * the borromean signature and brute force the correct (x_j, digit_k) pair.
+     *
+     * For each position j, recover_x(s_orig[j], ev[j], s[j]) yields the
+     * blinding factor that WOULD be the secret key if j were the signer's
+     * index.  For the actual secret index the result is sec_actual[rings-1]
+     * (non-zero); for a forged index without embedded message it is zero.
+     *
+     * For each non-zero candidate, check all digit positions k to find
+     * where candidate_x * G == pubs[npub_offset + k]. */
+    found = 0;
+    for (j = 0; j < rsizes[rings - 1] && !found; j++) {
+        secp256k1_rangeproof_recover_x(&candidate_x,
+            &s_orig[npub_offset + j], &ev[npub_offset + j],
+            &s[npub_offset + j]);
+        if (secp256k1_scalar_is_zero(&candidate_x)) {
+            continue;
+        }
+        secp256k1_ecmult_gen(ecmult_gen_ctx, &sec_g, &candidate_x);
+        for (k = 0; k < rsizes[rings - 1]; k++) {
+            secp256k1_gej_neg(&diff, &sec_g);
+            secp256k1_gej_add_var(&diff, &diff, &pubs[npub_offset + k], NULL);
+            if (secp256k1_gej_is_infinity(&diff)) {
+                value |= ((uint64_t)k) << ((rings - 1) * 2);
+                /* Recover the original commitment blinding factor:
+                 * During signing: sec_actual[n-1] = sec_drbg[n-1] + blind
+                 * Therefore:      blind = candidate_x - sec_drbg[n-1] */
+                secp256k1_scalar_negate(blind, &sec[rings - 1]);
+                secp256k1_scalar_add(blind, blind, &candidate_x);
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        secp256k1_memclear(prep, 4096);
+        return 0;
+    }
+
+    *v = value;
+
+    /* Cleanup sensitive data */
+    secp256k1_memclear(prep, 4096);
+    for (i = 0; i < 128; i++) {
+        secp256k1_scalar_clear(&s_orig[i]);
+    }
+    for (i = 0; i < 32; i++) {
+        secp256k1_scalar_clear(&sec[i]);
+    }
+    secp256k1_scalar_clear(&candidate_x);
+    secp256k1_gej_clear(&sec_g);
+    secp256k1_gej_clear(&diff);
+
+    return 1;
+}
+
 SECP256K1_INLINE static int secp256k1_rangeproof_getheader_impl(size_t *offset, int *exp, int *mantissa, uint64_t *scale,
  uint64_t *min_value, uint64_t *max_value, const unsigned char *proof, size_t plen) {
     int i;
@@ -680,6 +831,162 @@ SECP256K1_INLINE static int secp256k1_rangeproof_verify_impl(const secp256k1_ecm
         }
     }
     return ret;
+}
+
+/* Verifies the rangeproof then extracts the committed value and blinding
+ * factor by brute-forcing the digit decomposition (rather than relying on
+ * the sidechannel value encoding used by rewind). */
+SECP256K1_INLINE static int secp256k1_rangeproof_extract_impl(const secp256k1_ecmult_gen_context* ecmult_gen_ctx,
+ unsigned char *blindout, uint64_t *value_out,
+ uint64_t *min_value, uint64_t *max_value, const secp256k1_ge *commit,
+ const unsigned char *proof, size_t plen, const unsigned char *nonce,
+ const unsigned char *extra_commit, size_t extra_commit_len, const secp256k1_ge* genp) {
+    secp256k1_gej accj;
+    secp256k1_gej pubs[128];
+    secp256k1_ge c;
+    secp256k1_scalar s[128];
+    secp256k1_scalar evalues[128];
+    secp256k1_scalar blind;
+    secp256k1_sha256 sha256_m;
+    size_t rsizes[32];
+    int ret;
+    size_t i;
+    int exp;
+    int mantissa;
+    size_t offset;
+    size_t rings;
+    int overflow;
+    size_t npub;
+    int offset_post_header;
+    uint64_t scale;
+    uint64_t vv;
+    unsigned char signs[31];
+    unsigned char m[33];
+    const unsigned char *e0;
+
+    offset = 0;
+    if (!secp256k1_rangeproof_getheader_impl(&offset, &exp, &mantissa, &scale, min_value, max_value, proof, plen)) {
+        return 0;
+    }
+    offset_post_header = offset;
+    rings = 1;
+    rsizes[0] = 1;
+    npub = 1;
+    if (mantissa != 0) {
+        rings = (mantissa >> 1);
+        for (i = 0; i < rings; i++) {
+            rsizes[i] = 4;
+        }
+        npub = (mantissa >> 1) << 2;
+        if (mantissa & 1) {
+            rsizes[rings] = 2;
+            npub += rsizes[rings];
+            rings++;
+        }
+    }
+    VERIFY_CHECK(rings <= 32);
+    if (plen - offset < 32 * (npub + rings - 1) + 32 + ((rings+6) >> 3)) {
+        return 0;
+    }
+    secp256k1_sha256_initialize(&sha256_m);
+    secp256k1_rangeproof_serialize_point(m, commit);
+    secp256k1_sha256_write(&sha256_m, m, 33);
+    secp256k1_rangeproof_serialize_point(m, genp);
+    secp256k1_sha256_write(&sha256_m, m, 33);
+    secp256k1_sha256_write(&sha256_m, proof, offset);
+    for(i = 0; i < rings - 1; i++) {
+        signs[i] = (proof[offset + ( i>> 3)] & (1 << (i & 7))) != 0;
+    }
+    offset += (rings + 6) >> 3;
+    if ((rings - 1) & 7) {
+        /* Number of coded blinded points is not a multiple of 8, force extra
+         * sign bits to 0 to reject mutation. */
+        if ((proof[offset - 1] >> ((rings - 1) & 7)) != 0) {
+            return 0;
+        }
+    }
+    npub = 0;
+    secp256k1_gej_set_infinity(&accj);
+    if (*min_value) {
+        secp256k1_pedersen_ecmult_small(&accj, *min_value, genp);
+    }
+    for(i = 0; i < rings - 1; i++) {
+        secp256k1_fe fe;
+        if (!secp256k1_fe_set_b32_limit(&fe, &proof[offset]) ||
+            !secp256k1_ge_set_xquad(&c, &fe)) {
+            return 0;
+        }
+        if (signs[i]) {
+            secp256k1_ge_neg(&c, &c);
+        }
+        secp256k1_sha256_write(&sha256_m, &signs[i], 1);
+        secp256k1_sha256_write(&sha256_m, &proof[offset], 32);
+        secp256k1_gej_set_ge(&pubs[npub], &c);
+        secp256k1_gej_add_ge_var(&accj, &accj, &c, NULL);
+        offset += 32;
+        npub += rsizes[i];
+    }
+    secp256k1_gej_neg(&accj, &accj);
+    secp256k1_gej_add_ge_var(&pubs[npub], &accj, commit, NULL);
+    if (secp256k1_gej_is_infinity(&pubs[npub])) {
+        return 0;
+    }
+    secp256k1_rangeproof_pub_expand(pubs, exp, rsizes, rings, genp);
+    npub += rsizes[rings - 1];
+    e0 = &proof[offset];
+    offset += 32;
+    for (i = 0; i < npub; i++) {
+        secp256k1_scalar_set_b32(&s[i], &proof[offset], &overflow);
+        if (overflow) {
+            return 0;
+        }
+        offset += 32;
+    }
+    if (offset != plen) {
+        /* Extra data found, reject. */
+        return 0;
+    }
+    if (extra_commit != NULL) {
+        secp256k1_sha256_write(&sha256_m, extra_commit, extra_commit_len);
+    }
+    secp256k1_sha256_finalize(&sha256_m, m);
+    secp256k1_sha256_clear(&sha256_m);
+
+    /* Verify the borromean ring signature, always collecting challenge
+     * values since they are needed by extract_inner. */
+    ret = secp256k1_borromean_verify(evalues, e0, s, pubs, rsizes, rings, m, 32);
+    if (!ret) {
+        return 0;
+    }
+
+    /* Extract the value and blinding factor by brute-forcing the digit
+     * decomposition. */
+    if (!secp256k1_rangeproof_extract_inner(ecmult_gen_ctx, &blind, &vv,
+            evalues, s, pubs, rsizes, rings, nonce, commit, proof,
+            offset_post_header, genp)) {
+        return 0;
+    }
+
+    /* Verify the extracted result by reconstructing the commitment. */
+    vv = (vv * scale) + *min_value;
+    secp256k1_pedersen_ecmult(ecmult_gen_ctx, &accj, &blind, vv, genp);
+    if (secp256k1_gej_is_infinity(&accj)) {
+        return 0;
+    }
+    secp256k1_gej_neg(&accj, &accj);
+    secp256k1_gej_add_ge_var(&accj, &accj, commit, NULL);
+    if (!secp256k1_gej_is_infinity(&accj)) {
+        return 0;
+    }
+
+    if (blindout) {
+        secp256k1_scalar_get_b32(blindout, &blind);
+    }
+    if (value_out) {
+        *value_out = vv;
+    }
+    secp256k1_scalar_clear(&blind);
+    return 1;
 }
 
 #endif
