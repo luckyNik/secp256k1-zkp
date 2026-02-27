@@ -1361,6 +1361,8 @@ static void test_rangeproof_extract(void) {
     size_t i;
     int j;
 
+    printf("test_rangeproof_extract: running...\n");
+
     /* Test extract with randomised values */
     for (i = 0; i < (size_t)COUNT; i++) {
         testrand256(blind);
